@@ -7,6 +7,14 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
+
+/* ── ANSI colour codes ── */
+#define C_RESET "\033[0m"
+#define C_BOLD  "\033[1m"
+#define C_GREEN "\033[32m"
+#define C_BLUE  "\033[34m"
+#define C_CYAN  "\033[36m"
 
 #define MAX_LINE      80
 #define MAX_COMMANDS  32
@@ -56,8 +64,17 @@ void hist_free(History *h) {
 
 int read_input(char input_buffer[], History *h) {
     char path[PATH_MAX];
+    char hostname[256];
+    char *user;
+
     if (getcwd(path, sizeof(path)) == NULL) strcpy(path, "?");
-    printf("nsh:%s$ ", path);
+    if (gethostname(hostname, sizeof(hostname)) != 0) strcpy(hostname, "localhost");
+    user = getenv("USER");
+    if (!user) user = "user";
+
+    /* coloured prompt: user@host:path$ */
+    printf(C_BOLD C_GREEN "%s@%s" C_RESET ":" C_BOLD C_BLUE "%s" C_RESET "$ ",
+           user, hostname, path);
     fflush(stdout);
 
     memset(input_buffer, '\0', MAX_LINE);
@@ -252,6 +269,9 @@ void execute(char **args, int *background, History *h) {
     switch (pid) {
         case -1: perror("fork"); break;
         case 0:
+            /* restore default signal handlers so Ctrl+C kills child */
+            signal(SIGINT,  SIG_DFL);
+            signal(SIGQUIT, SIG_DFL);
             if (has_pipe(args)) execute_pipe_recursive(args);
             else execute_single(args);
             exit(EXIT_SUCCESS);
@@ -270,7 +290,25 @@ int main(void) {
 
     hist_init(&hist);
 
+    /*
+     * Step 6 — Signal handling
+     * Parent shell ignores SIGINT (Ctrl+C) and SIGQUIT (Ctrl+\).
+     * Child processes inherit the default handlers (reset before exec),
+     * so Ctrl+C kills only the foreground child, not the shell itself.
+     */
+    signal(SIGINT,  SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+
     while (1) {
+        /*
+         * Step 6 — Zombie reaping
+         * Before each prompt, collect any finished background children
+         * with WNOHANG so they don't accumulate as zombies.
+         */
+        pid_t zp;
+        while ((zp = waitpid(-1, NULL, WNOHANG)) > 0)
+            printf("\n[done] pid %d\n", zp);
+
         background = 0;
 
         int len = read_input(input_buffer, &hist);
