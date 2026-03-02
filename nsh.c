@@ -79,8 +79,8 @@ void print_welcome(void) {
     printf(C_CYAN C_BOLD);
     printf("╔══════════════════════════════════════════════════════╗\n");
     printf("║                                                      ║\n");
-    printf("║          Welcome to nsh — Nahyun Shell  (˶ᵔ ᵕ ᵔ˶)  ║\n");
-    printf("║     Type a command, or 'exit' / 'quit' to leave.    ║\n");
+    printf("║          Welcome to nsh — Nahyun Shell  (˶ᵔ ᵕ ᵔ˶)    ║\n");
+    printf("║     Type a command, or 'exit' / 'quit' to leave.     ║\n");
     printf("║                                                      ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n");
     printf(C_RESET "\n");
@@ -90,7 +90,7 @@ void print_farewell(void) {
     printf("\n" C_CYAN C_BOLD);
     printf("╔══════════════════════════════════════════════════════╗\n");
     printf("║                                                      ║\n");
-    printf("║          Bye! See you again~  ૮ ˶ᵔ ᵕ ᵔ˶ ა           ║\n");
+    printf("║          Bye! See you again~  ૮ ˶ᵔ ᵕ ᵔ˶ ა            ║\n");
     printf("║                                                      ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n");
     printf(C_RESET "\n");

@@ -1,15 +1,26 @@
-# nsh — A Simple Unix Shell
+# nsh — Nahyun Shell
 
-A lightweight Unix shell implemented in C.  
-Supports multi-stage pipes, I/O redirection, semicolon-sequenced commands, history, built-in commands, colored prompt, and proper signal handling.
+> A minimal Unix shell in C with multi-stage pipes, I/O redirection, history navigation, colored prompt, and signal handling.
+
+---
+
+## Demo
+
+![demo](demo.png)
 
 ---
 
 ## Build
 
 ```bash
-gcc -o nsh nsh.c
+make
 ./nsh
+```
+
+Clean build artifacts:
+
+```bash
+make clean
 ```
 
 ---
@@ -75,7 +86,14 @@ history
 !2
 ```
 
-### Step 7 — Signal / 좀비 프로세스
+### Step 7 — 방향키 history 탐색
+```
+# ↑ 키로 이전 명령어 탐색
+# ↓ 키로 최신 명령어로 이동
+# ← → 키로 커서 이동 후 중간 편집
+```
+
+### Step 8 — Signal / 좀비 프로세스
 ```
 sleep 10 &
 sleep 10 &
@@ -92,18 +110,9 @@ ls
 ### Basic Command Execution
 자식 프로세스를 생성하여 명령어를 실행한다. 포그라운드 실행 시 자식이 종료될 때까지 대기한다.
 
-```
-grep int nsh.c
-ps
-```
-
 ### Background Execution (`&`)
 명령어 끝에 `&`를 붙이면 부모 프로세스가 기다리지 않고 다음 명령을 즉시 받는다.  
 완료된 백그라운드 프로세스는 다음 프롬프트 출력 전에 자동으로 수거된다.
-
-```
-sleep 5 &
-```
 
 ### I/O Redirection
 | 연산자 | 동작 |
@@ -112,14 +121,6 @@ sleep 5 &
 | `>`    | stdout을 파일로 저장 (덮어쓰기) |
 | `>>`   | stdout을 파일에 이어쓰기 |
 | `2>`   | stderr를 파일로 저장 |
-
-```
-grep "int " < nsh.c
-ls -l > out.txt
-date >> out.txt
-ls /bad 2> err.txt
-sort < out.txt > sorted.txt
-```
 
 ### Multi-stage Pipes (`|`)
 파이프를 재귀적으로 처리하므로 단계 수 제한이 없다.
@@ -137,8 +138,6 @@ date; pwd; ls
 ```
 
 ### Built-in Commands
-fork 없이 부모 프로세스에서 직접 실행되는 명령어들.
-
 | 명령 | 동작 |
 |------|------|
 | `cd [dir]` | 디렉토리 이동. 인자 없으면 `$HOME`으로 이동 |
@@ -147,35 +146,35 @@ fork 없이 부모 프로세스에서 직접 실행되는 명령어들.
 | `history -c` | 히스토리 전체 삭제 |
 | `exit` / `quit` | 셸 종료 |
 
-### History
-이전에 입력한 명령어를 재사용할 수 있다.
-
+### History & Arrow Key Navigation
 | 입력 | 동작 |
 |------|------|
+| `↑` / `↓` | 이전/다음 명령어 탐색 |
+| `←` / `→` | 커서 이동 (중간 편집 가능) |
 | `history` | 전체 히스토리 출력 |
 | `!!` | 직전 명령어 재실행 |
 | `!n` | n번째 명령어 재실행 |
 | `history -c` | 히스토리 초기화 |
 
 ### Quote Handling
-싱글쿼트(`'`)와 더블쿼트(`"`) 내부의 공백과 특수문자를 하나의 토큰으로 처리한다.
+싱글쿼트/더블쿼트 내부의 공백·특수문자를 하나의 토큰으로 처리한다. 중첩 따옴표도 지원한다.
 
 ```
 grep "int " < nsh.c
 awk '{print $1,$2}'
+echo "it's fine"
+echo 'say "hello"'
 ```
 
 ### Colored Prompt
-`user@hostname:path$` 형태의 컬러 프롬프트를 출력한다.  
-`cd` 실행 후 프롬프트의 경로가 자동으로 업데이트된다.
-
-```
-becky@macbook:/home/becky/proj$
-```
+termios raw mode 기반으로 `user@hostname:path$` 형태의 컬러 프롬프트를 출력한다.  
+`cd` 실행 후 경로가 자동으로 업데이트된다.
 
 ### Signal Handling
-- 부모 셸은 `SIGINT` (Ctrl+C), `SIGQUIT` (Ctrl+\)를 무시한다.
-- 자식 프로세스는 exec 전에 기본 핸들러로 복원되므로 Ctrl+C로 포그라운드 명령만 종료된다.
+| 키 | 동작 |
+|----|------|
+| `Ctrl+C` | 현재 라인 클리어 (셸 유지) / 포그라운드 자식만 종료 |
+| `Ctrl+D` | 빈 라인에서 셸 종료 |
 
 ---
 
@@ -186,47 +185,44 @@ becky@macbook:/home/becky/proj$
 | 함수 | 역할 |
 |------|------|
 | `hist_init/add/print/clear/free()` | History 구조체 생명주기 관리 |
-| `read_input()` | 프롬프트 출력, 명령어 읽기, `!!`/`!n` 히스토리 확장 |
-| `split_commands()` | `;` 기준으로 명령어 분리 (따옴표 내부 무시) |
-| `parse_args()` | 단일 명령어를 args[]로 파싱. 따옴표/`&` 처리 |
-| `has_pipe()` | args에 `|` 토큰 존재 여부 확인 |
-| `remove_redir_tokens()` | 리다이렉션 심볼+파일명을 shift로 제거, NULL hole 없음 |
-| `apply_redirection()` | `<` `>` `>>` `2>` 처리 후 `dup2()`로 fd 교체 |
-| `execute_single()` | 리다이렉션 적용 후 `execvp()` 호출 |
+| `read_line()` | termios raw mode 라인 에디터. 방향키·Backspace·Ctrl 처리 |
+| `read_input()` | `read_line()` 래퍼. `!!` / `!n` 히스토리 확장 |
+| `split_commands()` | `;` 기준 명령어 분리 (따옴표 내부 무시) |
+| `parse_args()` | 단일 명령어 → args[] 파싱. 따옴표·`&` 처리 |
+| `has_pipe()` | args에 `\|` 토큰 존재 여부 확인 |
+| `remove_redir_tokens()` | 리다이렉션 심볼+파일명을 shift로 제거 |
+| `apply_redirection()` | `<` `>` `>>` `2>` 처리 후 `dup2()` |
+| `execute_single()` | 리다이렉션 적용 후 `execvp()` |
 | `execute_pipe_recursive()` | 재귀적 다단계 파이프 실행 |
 | `handle_builtin()` | `cd` / `pwd` / `history`를 부모에서 직접 처리 |
 | `execute()` | fork 후 builtin/single/pipe 분기, 백그라운드 처리 |
+
+### Raw Mode Line Editor
+
+```
+read_line()
+  tcsetattr(raw mode)
+    ↑ (ESC[A) → hist_pos--, 현재 입력 saved에 저장
+    ↓ (ESC[B) → hist_pos++, 끝까지 가면 saved 복원
+    ← (ESC[D) → cursor--
+    → (ESC[C) → cursor++
+    Backspace → buf[cursor-1] 삭제, tail 재출력
+    Ctrl+C    → 현재 라인 클리어, 새 프롬프트
+    Ctrl+D    → exit
+    Enter     → 루프 탈출
+  tcsetattr(restore)
+```
 
 ### Multi-pipe Recursive Strategy
 
 ```
 execute_pipe_recursive([a | b | c])
-  ├─ fork → 손자1: execvp(a)           [stdout → pipe1]
+  ├─ fork → 손자1: execvp(a)      [stdout → pipe1]
   └─ stdin ← pipe1
      execute_pipe_recursive([b | c])
-       ├─ fork → 손자2: execvp(b)      [stdout → pipe2]
+       ├─ fork → 손자2: execvp(b) [stdout → pipe2]
        └─ stdin ← pipe2
-          execute_single([c])          ← base case: execvp(c)
-```
-
-### Redirection Token Removal
-
-`apply_redirection()`은 NULL hole을 남기지 않도록 `remove_redir_tokens()`로 토큰을 즉시 shift한다.
-
-```
-before: ["sort", "<", "nsh.c", "|", "grep", NULL]
-after:  ["sort", "|", "grep", NULL]
-```
-
-### History Capacity Management
-
-초기 용량(`HIST_INIT_LEN = 100`)이 가득 차면 `realloc()`으로 2배 확장한다.
-
-```c
-if (h->count >= h->capacity) {
-    h->capacity *= 2;
-    h->entries = realloc(h->entries, h->capacity * sizeof(char *));
-}
+          execute_single([c])     ← base case
 ```
 
 ### Signal Flow
@@ -245,8 +241,7 @@ main()
 ## Limitations
 
 - 명령어 최대 길이: 80자 (`MAX_LINE`)
-- 한 줄 최대 명령어 수: 32개 (`MAX_COMMANDS`, `;` 기준)
-- 중첩 따옴표 미지원
+- 한 줄 최대 명령어 수: 32개 (`MAX_COMMANDS`)
 - `>|` (noclobber 우회) 미지원
 - `<<` (here document) 미지원
 - `jobs` / `fg` / `bg` job control 미지원
