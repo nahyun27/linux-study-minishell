@@ -6,288 +6,296 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <limits.h>
 
-#define MAX_LINE 80 /* The maximum length command */
-#define READ_END 0  /* The read end of the pipe  */
-#define WRITE_END 1 /* The write end of the pipe */
+#define MAX_LINE      80
+#define MAX_COMMANDS  32
+#define HIST_INIT_LEN 100
+#define READ_END      0
+#define WRITE_END     1
 
-/*
- * Read and parse a command line into args[].
- * Handles:
- *   - whitespace as token delimiters
- *   - single quotes: 'foo bar' → one token, quotes stripped
- *   - double quotes: "foo bar" → one token, quotes stripped
- *   - '&' suffix for background execution
- */
-int read_input(char input_buffer[], char *args[], int *background) {
-    int length;
-    int next;
+typedef struct {
+    char **entries;
+    int    count;
+    int    capacity;
+} History;
 
-    printf("nsh> ");
-    fflush(stdout);
-    length = read(STDIN_FILENO, input_buffer, MAX_LINE);
-
-    if (length < 0) {
-        perror("\ncommand-reading failed");
-        exit(-1);
-    }
-
-    /* null-terminate at newline */
-    int len = length;
-    int j;
-    for (j = 0; j < len; j++) {
-        if (input_buffer[j] == '\n') {
-            input_buffer[j] = '\0';
-            length = j;
-            break;
-        }
-    }
-
-    next = 0;
-    int i = 0;
-
-    while (i < length) {
-        /* skip whitespace */
-        while (i < length && (input_buffer[i] == ' ' || input_buffer[i] == '\t'))
-            i++;
-
-        if (i >= length) break;
-
-        /* background flag */
-        if (input_buffer[i] == '&') {
-            *background = 1;
-            input_buffer[i] = '\0';
-            i++;
-            continue;
-        }
-
-        /* single-quoted token: strip quotes, treat content as one token */
-        if (input_buffer[i] == '\'') {
-            i++; /* skip opening quote */
-            args[next++] = &input_buffer[i];
-            while (i < length && input_buffer[i] != '\'')
-                i++;
-            input_buffer[i] = '\0'; /* overwrite closing quote */
-            i++;
-            continue;
-        }
-
-        /* double-quoted token: strip quotes, treat content as one token */
-        if (input_buffer[i] == '"') {
-            i++; /* skip opening quote */
-            args[next++] = &input_buffer[i];
-            while (i < length && input_buffer[i] != '"')
-                i++;
-            input_buffer[i] = '\0'; /* overwrite closing quote */
-            i++;
-            continue;
-        }
-
-        /* normal token: ends at whitespace, quote, or '&' */
-        args[next++] = &input_buffer[i];
-        while (i < length &&
-               input_buffer[i] != ' '  &&
-               input_buffer[i] != '\t' &&
-               input_buffer[i] != '\'' &&
-               input_buffer[i] != '"'  &&
-               input_buffer[i] != '&')
-            i++;
-
-        if (i < length && input_buffer[i] != '\'' && input_buffer[i] != '"') {
-            input_buffer[i] = '\0';
-            i++;
-        }
-    }
-
-    args[next] = NULL;
-    return 1;
+void hist_init(History *h) {
+    h->entries  = (char **)calloc(HIST_INIT_LEN, sizeof(char *));
+    h->count    = 0;
+    h->capacity = HIST_INIT_LEN;
 }
 
-/* return 1 if args contains a pipe symbol '|', 0 otherwise */
+void hist_add(History *h, const char *cmd) {
+    if (!cmd || cmd[0] == '\0') return;
+    if (h->count >= h->capacity) {
+        h->capacity *= 2;
+        h->entries = (char **)realloc(h->entries, h->capacity * sizeof(char *));
+    }
+    h->entries[h->count++] = strdup(cmd);
+}
+
+void hist_print(const History *h) {
+    int i;
+    for (i = 0; i < h->count; i++)
+        printf("%4d  %s\n", i + 1, h->entries[i]);
+}
+
+void hist_clear(History *h) {
+    int i;
+    for (i = 0; i < h->count; i++) { free(h->entries[i]); h->entries[i] = NULL; }
+    h->count = 0;
+    printf("History cleared.\n");
+}
+
+void hist_free(History *h) {
+    hist_clear(h);
+    free(h->entries);
+    h->entries = NULL;
+}
+
+int read_input(char input_buffer[], History *h) {
+    char path[PATH_MAX];
+    if (getcwd(path, sizeof(path)) == NULL) strcpy(path, "?");
+    printf("nsh:%s$ ", path);
+    fflush(stdout);
+
+    memset(input_buffer, '\0', MAX_LINE);
+    int length = read(STDIN_FILENO, input_buffer, MAX_LINE - 1);
+    if (length < 0) { perror("\ncommand-reading failed"); exit(-1); }
+
+    if (length > 0 && input_buffer[length - 1] == '\n')
+        input_buffer[--length] = '\0';
+    if (length == 0) return 0;
+
+    /* !! - repeat last command */
+    if (strncmp(input_buffer, "!!", 2) == 0 && input_buffer[2] == '\0') {
+        if (h->count == 0) { fprintf(stderr, "nsh: !!: no previous command\n"); return 0; }
+        strncpy(input_buffer, h->entries[h->count - 1], MAX_LINE - 1);
+        printf("%s\n", input_buffer);
+        return strlen(input_buffer);
+    }
+
+    /* !n - repeat n-th command */
+    if (input_buffer[0] == '!' && length > 1) {
+        int n = atoi(&input_buffer[1]);
+        if (n > 0 && n <= h->count) {
+            strncpy(input_buffer, h->entries[n - 1], MAX_LINE - 1);
+            printf("%s\n", input_buffer);
+            return strlen(input_buffer);
+        } else {
+            fprintf(stderr, "nsh: !%d: event not found\n", n);
+            return 0;
+        }
+    }
+
+    return length;
+}
+
+int split_commands(char *buf, char *commands[], int max_cmd) {
+    int count = 0, len = strlen(buf), start = 0, i;
+    char in_sq = 0, in_dq = 0;
+    for (i = 0; i <= len && count < max_cmd; i++) {
+        char c = buf[i];
+        if (c == '\'' && !in_dq) { in_sq = !in_sq; continue; }
+        if (c == '"'  && !in_sq) { in_dq = !in_dq; continue; }
+        if ((c == ';' || c == '\0') && !in_sq && !in_dq) {
+            buf[i] = '\0';
+            while (buf[start] == ' ' || buf[start] == '\t') start++;
+            if (buf[start] != '\0') commands[count++] = &buf[start];
+            start = i + 1;
+        }
+    }
+    return count;
+}
+
+int parse_args(char *cmd, char *args[], int *background) {
+    int next = 0, length = strlen(cmd), i = 0;
+    while (i < length) {
+        while (i < length && (cmd[i] == ' ' || cmd[i] == '\t')) i++;
+        if (i >= length) break;
+        if (cmd[i] == '&') { *background = 1; cmd[i++] = '\0'; continue; }
+        if (cmd[i] == '\'') {
+            i++; args[next++] = &cmd[i];
+            while (i < length && cmd[i] != '\'') i++;
+            cmd[i++] = '\0'; continue;
+        }
+        if (cmd[i] == '"') {
+            i++; args[next++] = &cmd[i];
+            while (i < length && cmd[i] != '"') i++;
+            cmd[i++] = '\0'; continue;
+        }
+        args[next++] = &cmd[i];
+        while (i < length && cmd[i] != ' ' && cmd[i] != '\t' &&
+               cmd[i] != '\'' && cmd[i] != '"' && cmd[i] != '&') i++;
+        if (i < length && cmd[i] != '\'' && cmd[i] != '"') cmd[i++] = '\0';
+    }
+    args[next] = NULL;
+    return next;
+}
+
 int has_pipe(char **args) {
     int i;
-    for (i = 0; args[i] != NULL; i++) {
-        if (strcmp(args[i], "|") == 0)
-            return 1;
-    }
+    for (i = 0; args[i] != NULL; i++)
+        if (strcmp(args[i], "|") == 0) return 1;
     return 0;
 }
 
-/*
- * Remove args[idx] and args[idx+1] (redirection symbol + filename) by
- * shifting all subsequent pointers left by 2.  This avoids NULL holes
- * so execvp always receives a clean, contiguous argument list.
- */
 void remove_redir_tokens(char **args, int idx) {
     int i;
-    for (i = idx; args[i + 2] != NULL; i++)
-        args[i] = args[i + 2];
-    /* terminate the shifted array */
-    args[i]     = NULL;
-    args[i + 1] = NULL;
+    for (i = idx; args[i + 2] != NULL; i++) args[i] = args[i + 2];
+    args[i] = NULL; args[i + 1] = NULL;
 }
 
-/*
- * Apply I/O redirection found in args.
- * Handles:  command < file
- *           command > file
- *           command < file1 > file2
- * Redirection tokens and their filenames are shifted out of args in-place,
- * so no NULL holes are left — execvp receives a clean argument list.
- */
 void apply_redirection(char **args) {
     int i = 0;
     while (args[i] != NULL) {
         if (strcmp(args[i], "<") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "nsh: missing input file\n");
-                exit(-1);
-            }
-            int fd = open(args[i + 1], O_RDONLY, 0);
-            if (fd < 0) {
-                perror("open failed");
-                exit(-1);
-            }
-            dup2(fd, STDIN_FILENO);
-            close(fd);
+            if (!args[i+1]) { fprintf(stderr,"nsh: missing input file\n"); exit(-1); }
+            int fd = open(args[i+1], O_RDONLY);
+            if (fd < 0) { perror("open"); exit(-1); }
+            dup2(fd, STDIN_FILENO); close(fd);
             remove_redir_tokens(args, i);
-            /* don't advance i — the slot now holds the next token */
-
+        } else if (strcmp(args[i], ">>") == 0) {
+            if (!args[i+1]) { fprintf(stderr,"nsh: missing output file\n"); exit(-1); }
+            int fd = open(args[i+1], O_CREAT|O_WRONLY|O_APPEND, 0644);
+            if (fd < 0) { perror("open"); exit(-1); }
+            dup2(fd, STDOUT_FILENO); close(fd);
+            remove_redir_tokens(args, i);
+        } else if (strcmp(args[i], "2>") == 0) {
+            if (!args[i+1]) { fprintf(stderr,"nsh: missing error file\n"); exit(-1); }
+            int fd = open(args[i+1], O_CREAT|O_WRONLY|O_TRUNC, 0644);
+            if (fd < 0) { perror("open"); exit(-1); }
+            dup2(fd, STDERR_FILENO); close(fd);
+            remove_redir_tokens(args, i);
         } else if (strcmp(args[i], ">") == 0) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "nsh: missing output file\n");
-                exit(-1);
-            }
-            int fd = creat(args[i + 1], 0644);
-            if (fd < 0) {
-                perror("creat failed");
-                exit(-1);
-            }
-            dup2(fd, STDOUT_FILENO);
-            close(fd);
+            if (!args[i+1]) { fprintf(stderr,"nsh: missing output file\n"); exit(-1); }
+            int fd = open(args[i+1], O_CREAT|O_WRONLY|O_TRUNC, 0644);
+            if (fd < 0) { perror("open"); exit(-1); }
+            dup2(fd, STDOUT_FILENO); close(fd);
             remove_redir_tokens(args, i);
-
         } else {
             i++;
         }
     }
 }
 
-/*
- * Execute a single command (no pipe).
- * Handles I/O redirection.  Must be called inside a child process.
- */
 void execute_single(char **args) {
-    apply_redirection(args);  /* shifts tokens out in-place, no holes left */
-
+    apply_redirection(args);
     if (args[0] == NULL) return;
-
     if (execvp(args[0], args) != 0) {
-        perror("\nexecvp failed");
+        fprintf(stderr, "nsh: %s: %s\n", args[0], strerror(errno));
         exit(-1);
     }
 }
 
-/*
- * Recursively execute a (possibly multi-stage) pipeline.
- *
- * Strategy:
- *   - Find the first '|' and split args into left and right.
- *   - Fork a grandchild that writes to the pipe and runs left.
- *   - Current process reads from the pipe and recurses on right.
- *   - Base case (no '|'): execute the command directly with execvp.
- *
- * This function is always called from within a child process, so
- * the final execvp replaces the current process image directly.
- */
 void execute_pipe_recursive(char **args) {
     int i;
     for (i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "|") == 0) {
-            /* split: args = left side, right = everything after '|' */
             args[i] = NULL;
             char **right = &args[i + 1];
-
             int fd[2];
-            if (pipe(fd) < 0) {
-                perror("\npipe failed");
-                exit(-1);
-            }
-
+            if (pipe(fd) < 0) { perror("pipe"); exit(-1); }
             pid_t pid = fork();
-            if (pid < 0) {
-                perror("\nfork failed");
-                exit(-1);
-            }
-
+            if (pid < 0) { perror("fork"); exit(-1); }
             if (pid == 0) {
-                /* grandchild: write left side output into pipe */
                 close(fd[READ_END]);
                 dup2(fd[WRITE_END], STDOUT_FILENO);
                 close(fd[WRITE_END]);
-                execute_single(args);   /* handles redirection + execvp */
-                exit(-1);              /* reached only on execvp failure */
+                execute_single(args);
+                exit(-1);
             } else {
-                /* current process: read from pipe, continue with right side */
                 close(fd[WRITE_END]);
                 dup2(fd[READ_END], STDIN_FILENO);
                 close(fd[READ_END]);
-                /* recurse: right side may contain more pipes */
                 execute_pipe_recursive(right);
             }
-            return; /* unreachable after execute_pipe_recursive */
+            return;
         }
     }
-
-    /* Base case: no pipe found, execute directly */
     execute_single(args);
 }
 
-/*
- * Fork and run a command (single or piped).
- * Parent waits unless background flag is set.
- */
-void execute(char **args, const int *background) {
+int handle_builtin(char **args, History *h) {
+    if (args[0] == NULL) return 0;
+
+    if (strcmp(args[0], "cd") == 0) {
+        const char *target = args[1] ? args[1] : getenv("HOME");
+        if (!target) target = "/";
+        if (chdir(target) < 0)
+            fprintf(stderr, "nsh: cd: %s: %s\n", target, strerror(errno));
+        return 1;
+    }
+
+    if (strcmp(args[0], "pwd") == 0) {
+        char path[PATH_MAX];
+        if (getcwd(path, sizeof(path))) printf("%s\n", path);
+        else perror("pwd");
+        return 1;
+    }
+
+    if (strcmp(args[0], "history") == 0) {
+        if (args[1] && strcmp(args[1], "-c") == 0) hist_clear(h);
+        else hist_print(h);
+        return 1;
+    }
+
+    return 0;
+}
+
+void execute(char **args, int *background, History *h) {
+    if (args[0] == NULL) return;
+    if (handle_builtin(args, h)) return;
+
     pid_t pid = fork();
-
     switch (pid) {
-        case -1:
-            perror("\nfork failed");
-            break;
-
+        case -1: perror("fork"); break;
         case 0:
-            /* child process */
-            if (has_pipe(args))
-                execute_pipe_recursive(args);
-            else
-                execute_single(args);
+            if (has_pipe(args)) execute_pipe_recursive(args);
+            else execute_single(args);
             exit(EXIT_SUCCESS);
-
         default:
-            /* parent process */
-            if (*background == 0)
-                wait(NULL);
+            if (!*background) waitpid(pid, NULL, 0);
     }
 }
 
 int main(void) {
-    char *args[MAX_LINE / 2 + 1];  /* command line arguments */
-    char input_buffer[MAX_LINE];   /* buffer for storing commands */
+    char  input_buffer[MAX_LINE];
+    char  cmd_copy[MAX_LINE];
+    char *commands[MAX_COMMANDS];
+    char *args[MAX_LINE / 2 + 1];
+    int   background, cmd_count, i;
+    History hist;
 
-    int should_run;   /* flag: command was read successfully */
-    int background;   /* 1 when command ends with '&' */
+    hist_init(&hist);
 
     while (1) {
         background = 0;
-        should_run = 0;
 
-        should_run = read_input(input_buffer, args, &background);
+        int len = read_input(input_buffer, &hist);
+        if (len == 0) continue;
 
-        if (args[0] != NULL && strcmp(args[0], "exit") == 0)
-            return 0;
+        if (strcmp(input_buffer, "exit") == 0 || strcmp(input_buffer, "quit") == 0) {
+            hist_free(&hist);
+            break;
+        }
 
-        if (should_run && args[0] != NULL)
-            execute(args, &background);
+        hist_add(&hist, input_buffer);
+
+        strncpy(cmd_copy, input_buffer, MAX_LINE - 1);
+        cmd_copy[MAX_LINE - 1] = '\0';
+        cmd_count = split_commands(cmd_copy, commands, MAX_COMMANDS);
+
+        for (i = 0; i < cmd_count; i++) {
+            background = 0;
+            char seg[MAX_LINE];
+            strncpy(seg, commands[i], MAX_LINE - 1);
+            seg[MAX_LINE - 1] = '\0';
+            if (parse_args(seg, args, &background) == 0) continue;
+            execute(args, &background, &hist);
+        }
     }
+
     return 0;
 }
